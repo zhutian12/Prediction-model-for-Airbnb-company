@@ -1,0 +1,301 @@
+---
+title: "Final Case"
+author: "Tian Zhu"
+date: "December 12, 2018"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r}
+library(plyr)
+library(tm)
+library(tidytext)
+library(ggplot2)
+library(tidyverse)
+library(tidyr)
+library(plotrix)
+library(GGally)
+library(ipred)
+library(rpart)
+library(rpart.plot)
+library(class)
+library(caret)
+library(randomForest)
+library(wordcloud)
+library(corrplot)
+library(Metrics)
+library(adabag)
+
+#Read Data
+crime_original <- read.csv("c:/users/zttzhu/My R Work/Final Case/final-project-b/Final External Data/crime_incident_reports.csv",na.strings=c("","NA"))
+population_num <- read.csv("c:/users/zttzhu/My R Work/Final Case/final-project-b/Final External Data/Population.csv")
+airbnb <- read.csv("c:/users/zttzhu/My R Work/Final Case/final-project-b/Final airbnb project data/Boston Listings 2018 Case 1 Main v3.csv")
+review <- read.csv("C:/Users/zttzhu/Desktop/Airbnb/reviews.csv", stringsAsFactors = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# remove 1952 rows with NA district number
+df_crime <- crime_original[-which(is.na(crime_original$DISTRICT)),]
+
+#Creat a new column named district_name
+df_crime$district_name <- NA 
+df_crime$district_name <- ifelse(df_crime$DISTRICT=="A1","Downtown", ifelse(df_crime$DISTRICT=="A7", "East Boston",ifelse(df_crime$DISTRICT=="B2", "Roxbury", ifelse(df_crime$DISTRICT=="B3", "Mattapan", ifelse(df_crime$DISTRICT=="C6", "South Boston", ifelse(df_crime$DISTRICT=="C11", "Dorchester", ifelse(df_crime$DISTRICT=="D4", "South End", ifelse(df_crime$DISTRICT=="D14", "Brighton", ifelse(df_crime$DISTRICT=="E5", "West Roxbury", ifelse(df_crime$DISTRICT=="E13", "Jamaica Plain", ifelse(df_crime$DISTRICT=="E18", "Hyde Park", ifelse(df_crime$DISTRICT=="A15", "Charlestown", "NA"))))))))))))
+df_crime$district_name <- as.factor(df_crime$district_name)
+
+#Calulate the shooting incidents crime rate
+df_crime_shooting <- df_crime %>%
+  filter(YEAR == 2017) %>%
+  filter(SHOOTING == "Y") %>%
+  select(district_name, DISTRICT) %>%
+  group_by(district_name) %>%
+  summarise(crime_number=n()) %>%
+  left_join(population_num, by=c("district_name"="Area")) %>%
+  mutate(crime_rate = crime_number/Pop_Num * 100000) 
+
+#Do data cleaning and join shooting crime rate data into Main V3
+summary(airbnb)
+airbnb2 <- airbnb[, c(1,6,8,15,16,17,18,19,20,22,25,26,27,28,29)]
+airbnb2$property_type <- recode(airbnb$property_type, "Apartment"="Apt", "House"="House", "Condominium"="Condo", .default="Other")
+airbnb2$host_response_rate <- as.numeric(sub("%","",airbnb$host_response_rate))
+meanhst <- mean(airbnb2$host_response_rate, na.rm = TRUE)
+airbnb2$host_response_rate[is.na.data.frame(airbnb2$host_response_rate)] <- meanhst
+meancf <- mean(airbnb2$cleaning_fee, na.rm = TRUE)
+airbnb2$cleaning_fee[is.na.data.frame(airbnb2$cleaning_fee)] <- meancf
+meanbr <- mean(airbnb2$bathrooms, na.rm = TRUE)
+airbnb2$bathrooms[is.na.data.frame(airbnb2$bathrooms)] <- meanbr
+airbnb2$bedrooms[is.na.data.frame(airbnb2$bedrooms)] <- 1
+airbnb2$beds[is.na.data.frame(airbnb2$beds)] <- 1
+airbnb2$security_deposit[is.na.data.frame(airbnb2$security_deposit)] <- 100
+airbnb2$maximum_nights[is.na.data.frame(airbnb2$maximum_nights)] <- 720
+airbnb2$maximum_nights[which(airbnb2$maximum_nights > 5000)] <- 1000
+df_crime_shooting$district_name<- as.factor(df_crime_shooting$district_name)
+airbnb2$neighbourhood_cleansed[which (airbnb$neighbourhood_cleansed == "Allston")] <- "Brighton"
+airbnb2 <- inner_join(airbnb2, df_crime_shooting, by=c("neighbourhood_cleansed"="district_name"))
+summary(airbnb2)
+```
+```{r, message=FALSE, warning=FALSE}
+#Tree Model
+#Create a popularity variable 
+airbnb2$popularity <- NA
+airbnb2$popularity <- ifelse(airbnb2$availability_90 > 30, "Unpopular", "Popular")
+#Split data into training and testing data
+set.seed(88)
+airbnb3 <- airbnb2[, -15]
+airbnb3$neighbourhood_cleansed <- as.character(airbnb3$neighbourhood_cleansed)
+airbnb3$popularity <- as.factor(airbnb3$popularity)
+train.index <- sample(c(1:dim(airbnb3)[1]), dim(airbnb3)[1]*0.7)  
+train.df <- airbnb3[train.index, ]
+valid.df <- airbnb3[-train.index, ]
+# Preliminary tree
+airbnb.ct <- rpart(popularity ~ ., data = train.df, method = "class", cp = 0.005)
+# Count number of leaves
+length(airbnb.ct$frame$var[airbnb.ct$var == "<leaf>"]) 
+# print the table
+printcp(airbnb.ct)
+plotcp(airbnb.ct)
+# plot preliminary tree
+prp(airbnb.ct, type = 1, extra = 1, under = TRUE, split.font = 4, varlen = -10, box.col=ifelse(airbnb.ct$frame$var == "<leaf>", 'lightblue', 'lightgreen'))
+
+# Applying the first tree to training and validation set
+Cm.ct.point.pred.train <- predict(airbnb.ct,train.df,type = "class")
+Cm.ct.point.pred.valid <- predict(airbnb.ct,valid.df,type = "class")
+train.df$popularity <- as.factor(train.df$popularity)
+valid.df$popularity <- as.factor(valid.df$popularity)
+
+# Generate confusion matrix for training data, then with validation
+confusionMatrix(Cm.ct.point.pred.train, train.df$popularity)
+confusionMatrix(Cm.ct.point.pred.valid, valid.df$popularity)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#Pruned Tree
+#Retrieve optimal cp value based on cross-validated error
+opt_index <- which.min(airbnb.ct$cptable[, "xerror"])
+opt_index
+cp_opt <- airbnb.ct$cptable[8, "CP"]
+pruned.ct <- prune(airbnb.ct, cp = cp_opt)
+
+# Plot the pruned tree
+prp(pruned.ct, type = 1, extra = 1, under = TRUE, split.font = 4, varlen = -10, 
+	box.col=ifelse(pruned.ct$frame$var == "<leaf>", 'lightblue', 'lightgreen')) 
+
+# Applying the pruned tree to training and validation set
+Cm.ct.point.pred.train1 <- predict(pruned.ct,train.df,type = "class")
+Cm.ct.point.pred.valid1 <- predict(pruned.ct,valid.df,type = "class")
+# Generate confusion matrix for training data, then with validation
+confusionMatrix(Cm.ct.point.pred.train1, train.df$popularity)
+confusionMatrix(Cm.ct.point.pred.valid1, valid.df$popularity)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#random forest
+set.seed(88)
+train.df$neighbourhood_cleansed <- as.factor(train.df$neighbourhood_cleansed)
+valid.df$neighbourhood_cleansed <- as.factor(valid.df$neighbourhood_cleansed)
+rf.model <- randomForest(popularity ~ ., data = train.df, ntree = 500, mtry = 4, nodesize = 5)
+#evaulate OOB error
+err <- rf.model$err.rate
+nrow(err)
+oob_err <- err[500, "OOB"]
+print(oob_err)
+plot(rf.model) %>% legend(x = "right", 
+       legend = colnames(err),
+       fill = 1:ncol(err))
+#When number of tree bigger than 100, it doesn't generate further information, so we set ntree = 100
+rf.model <- randomForest(popularity ~ ., data = train.df, ntree = 100, mtry = 4, nodesize = 5)
+#Generate predicted classes
+prediction.rf <- predict(rf.model, valid.df )
+cm <- confusionMatrix(prediction.rf, valid.df$popularity)
+#Tuning the random forest model
+mtry <- seq(4, ncol(airbnb3) * 0.8, 2)
+nodesize <- seq(3, 8, 2)
+sampsize <- nrow(valid.df) * c(0.7, 0.8)
+hyper_grid <- expand.grid(mtry = mtry, nodesize = nodesize, sampsize = sampsize)
+ob_err <- c()
+
+for (i in 1:nrow(hyper_grid)) {
+
+   
+    model <- randomForest(formula = popularity ~ ., 
+                          data = valid.df,
+                          mtry = hyper_grid$mtry[i],
+                          nodesize = hyper_grid$nodesize[i],
+                          sampsize = hyper_grid$sampsize[i])
+                          
+                          
+    oob_err[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+}
+
+opt_i <- which.min(oob_err)
+print(hyper_grid[opt_i,])
+#Tuned rf model
+rf.tuned <- randomForest(popularity ~ ., data = train.df, ntree = 100, mtry = 4, nodesize = 5, importance = TRUE)
+varImpPlot(rf.tuned, type = 1, title = "Importance of Variables")
+imp <- importance(rf.tuned)
+imp
+prediction.rf.tuned <- predict(rf.tuned, valid.df)
+cm.tuned <- confusionMatrix(prediction.rf.tuned, valid.df$popularity)
+cm.tuned
+```
+
+```{r}
+#boosted tree
+set.seed(88)
+boost.model <- boosting(popularity ~ ., data = train.df)
+prediction.boosting <- predict(boost.model, valid.df)
+prediction.boosting$class <- as.factor(prediction.boosting$class)
+cm.boost <- confusionMatrix(prediction.boosting$class, valid.df$popularity)
+cm.boost
+```
+
+```{r, message=FALSE, warning=FALSE}
+#bagging
+set.seed(88)
+bagging.tree <- bagging(formula = popularity ~ ., data = train.df, coob = TRUE)
+pred_bagging <- predict(object = bagging.tree, newdata = valid.df, type = "class")
+pred_bagging$class <- as.factor(pred_bagging$class)
+confusionMatrix(pred_bagging$class, valid.df$popularity)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Adding review score data using text mining
+# Calculate review score
+review <- review[,c(1,6)]
+set.seed(88)
+
+## Randomly select 5 comments with replacement based on each id
+review <- ddply(review, .(listing_id), function(x) x[sample(nrow(x),5,replace = T),])  
+
+## Combine comments of each id
+review2<-review[,c(1,2)]
+review2[,1]<-as.factor(review2$listing_id)
+review2 <- ddply(review2, .(listing_id), summarize,
+                 comments = paste(comments,collapse=","))
+review3 <- data.frame(review2[,-1])
+row.names(review3)<-review2$listing_id
+colnames(review3)<-"comments"
+
+## Clean corpus
+review3 <- as.character(review3$comments)
+review_source<-VectorSource(review3)
+review_corpus<-VCorpus(review_source)
+exceptions <- grep(pattern = "not|n't", x = stopwords(), value = TRUE)
+my_stopwords <- setdiff(stopwords("en"), exceptions)
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, 
+                   c(my_stopwords, "boston","stay","place","really","everything","home","definitely","also","just","made","back","get","one"))
+  return(corpus)
+}
+clean_corp<-clean_corpus(review_corpus)
+
+## Calculate scores
+rev_df_new<-data.frame(text = sapply(clean_corp, as.character), stringsAsFactors = FALSE)
+rev_df_new$document<-c(1:nrow(rev_df_new))
+rev_df_new$id<-review2[,1]
+review_tdm <- TermDocumentMatrix(clean_corp)
+rev_tidy<-tidy(review_tdm)
+afinn <- get_sentiments("afinn")
+rev_afinn <- rev_tidy %>% 
+  
+  # Inner Join to AFINN lexicon
+  inner_join(afinn, by = c("term" = "word"))
+rev_afinn$t_score<-rev_afinn$score*rev_afinn$count
+rev_afinn[,3]<-NULL
+rev_afinn_agg<-aggregate(rev_afinn$t_score, by=list(rev_afinn$document), FUN=sum)
+colnames(rev_afinn_agg)<-c("document","total_score")
+rev_afinn_agg$document<-as.integer(rev_afinn_agg$document)
+rev_df_new<-rev_df_new %>%
+  inner_join(rev_afinn_agg,by =c("document"="document"))
+
+# Add score to airbnb dataset
+airbnb2$id<-as.factor(airbnb2$id)
+airbnb2<- airbnb2 %>%
+  inner_join(rev_df_new[,c(3,4)], by=c("id"="id"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+#take a look at the correlation between each variable
+airbnb.cor <- airbnb2[, -c(1,3,4,5,19)]
+airbnb.cor <- as.matrix(airbnb.cor)
+corr <- cor(airbnb.cor)
+col1 <- colorRampPalette(c("#7F0000","red","#FF7F00","yellow","white", "cyan", "#007FFF", "blue","#00007F"))
+corrplot(corr, method = "color", col = col1(20), cl.length = 21, order = "AOE")
+
+#Correlation between each variable
+#linear regression model
+lr.airbnb <- lm(availability_90 ~ host_response_rate + as.factor(property_type) + as.factor(room_type) + accommodates + bathrooms + bedrooms + beds + price +security_deposit + cleaning_fee + minimum_nights + maximum_nights + crime_rate + total_score, 
+                data = airbnb2)
+summary(lr.airbnb)
+#start to drop variables based on their p-value
+#Drop minimum_nights since its' p-value is 0.8764
+lr.airbnb <- lm(availability_90 ~ host_response_rate + as.factor(property_type) + as.factor(room_type) + accommodates + bathrooms + bedrooms + beds + price + security_deposit + cleaning_fee  + maximum_nights + crime_rate + total_score, 
+                data = airbnb2)
+summary(lr.airbnb)
+#drop bed since its' p-value is 0.32
+lr.airbnb <- lm(availability_90 ~ host_response_rate + as.factor(property_type) + as.factor(room_type) + accommodates + bathrooms + bedrooms + price + security_deposit + cleaning_fee  + maximum_nights + crime_rate + total_score, 
+                data = airbnb2)
+summary(lr.airbnb)
+#drop host response rate since its' p-value is 0.22
+lr.airbnb <- lm(availability_90 ~ as.factor(property_type) + as.factor(room_type) + accommodates + bathrooms + bedrooms + price + security_deposit + cleaning_fee  + maximum_nights + crime_rate + total_score, 
+                data = airbnb2)
+summary(lr.airbnb)
+#drop bathroom since its' p-value is 0.12
+lr.airbnb <- lm(availability_90 ~ as.factor(property_type) + as.factor(room_type) + accommodates +bedrooms + price + security_deposit + cleaning_fee  + maximum_nights + crime_rate + total_score, 
+                data = airbnb2)
+summary(lr.airbnb)
+
+#cooks distance, most points follow the pattern (lower than 0.01)
+plot(cooks.distance(lr.airbnb), pch=16, col="blue") 
+
+```
+
+
+
+
+
+
